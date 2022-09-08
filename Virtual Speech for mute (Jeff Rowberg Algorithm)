@@ -1,0 +1,459 @@
+
+// I2Cdev and MPU6050 must be installed as libraries, or else the .cpp/.h files
+// for both classes must be in the include path of your project
+// Libraries
+#include "I2Cdev.h"
+#include "MPU6050_6Axis_MotionApps20.h"
+//#include "MPU6050.h" // not necessary if using MotionApps include file
+// Arduino Wire library is required if I2Cdev I2CDEV_ARDUINO_WIRE implementation
+// is used in I2Cdev.h
+#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+#include "Wire.h"
+#endif
+// class default I2C address is 0x68
+// specific I2C addresses may be passed as a parameter here
+// AD0 low = 0x68 (default for SparkFun breakout and InvenSense evaluation board)
+// AD0 high = 0x69
+
+MPU6050 mpu;
+//MPU6050 mpu(0x69); // <-- use for AD0 high
+
+// uncomment "OUTPUT_READABLE_QUATERNION" if you want to see the actual
+// quaternion components in a [w, x, y, z] format (not best for parsing
+// on a remote host such as Processing or something though)
+//#define OUTPUT_READABLE_QUATERNION
+
+// uncomment "OUTPUT_READABLE_EULER" if you want to see Euler angles
+// (in degrees) calculated from the quaternions coming from the FIFO.
+// Note that Euler angles suffer from gimbal lock (for more info, see
+// http://en.wikipedia.org/wiki/Gimbal_lock)
+//#define OUTPUT_READABLE_EULER
+
+// uncomment "OUTPUT_READABLE_YAWPITCHROLL" if you want to see the yaw/
+// pitch/roll angles (in degrees) calculated from the quaternions coming
+// from the FIFO. Note this also requires gravity vector calculations.
+// Also note that yaw/pitch/roll angles suffer from gimbal lock (for
+// more info, see: http://en.wikipedia.org/wiki/Gimbal_lock)
+#define OUTPUT_READABLE_YAWPITCHROLL
+
+// uncomment "OUTPUT_READABLE_REALACCEL" if you want to see acceleration
+// components with gravity removed. This acceleration reference frame is
+// not compensated for orientation, so +X is always +X according to the
+// sensor, just without the effects of gravity. If you want acceleration
+// compensated for orientation, us OUTPUT_READABLE_WORLDACCEL instead.
+#define OUTPUT_READABLE_REALACCEL
+
+// uncomment "OUTPUT_READABLE_WORLDACCEL" if you want to see acceleration
+// components with gravity removed and adjusted for the world frame of
+// reference (yaw is relative to initial orientation, since no magnetometer
+// is present in this case). Could be quite handy in some cases.
+#define OUTPUT_READABLE_WORLDACCEL
+#define INTERRUPT_PIN 2  // use pin 2 on Arduino Uno & most boards
+#define LED_PIN 13 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
+bool blinkState = false, And = true, This = true, proj = true, My = true;
+int preva, prevb, prevc, prevd, preve, starttime, endtime, starttime1, endtime1, endtime2, starttime2 ;
+int a, b, c, d, e, f, g, h, i, Nare, project = 0, designed = 0, vocally = 0, help = 0;
+
+String newprint, prevprint;
+
+bool dmpReady = false;  // set true if DMP init was successful
+uint8_t mpuIntStatus;   // holds actual interrupt status byte from MPU
+uint8_t devStatus;      // return status after each device operation (0 = success, !0 = error)
+uint16_t packetSize;    // expected DMP packet size (default is 42 bytes)
+uint16_t fifoCount;     // count of all bytes currently in FIFO
+uint8_t fifoBuffer[64]; // FIFO storage buffer
+const int debugOutput = 0;
+// orientation/motion vars
+Quaternion q;           // [w, x, y, z]         quaternion container
+VectorInt16 aa;         // [x, y, z]            accel sensor measurements
+VectorInt16 aaReal;     // [x, y, z]            gravity-free accel sensor measurements
+VectorInt16 aaWorld;    // [x, y, z]            world-frame accel sensor measurements
+VectorFloat gravity;    // [x, y, z]            gravity vector
+float euler[3];         // [psi, theta, phi]    Euler angle container
+float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
+
+volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+
+
+int lowerX = 3000;
+int upperX = 15000;
+int lowerY = 5000;
+int upperY = 15000;
+int lowerZ = 5000;
+int upperZ = 15000;
+/*
+   open values
+   A0 =  240
+   A1 =  180
+   A2 =  240
+   A3 =  180
+   close values
+   A0 =  120
+   A1 =  80
+   A2 =  120
+   A3 =  120
+*/
+
+long previousMillis = 0, currentMillis = 0;
+
+void dmpDataReady() {
+  mpuInterrupt = true;
+}
+
+int counter = 0;
+
+void setup() {
+  pinMode(A0, INPUT);
+  pinMode(A1, INPUT);
+  pinMode(A2, INPUT);
+  pinMode(A3, INPUT);
+  // join I2C bus (I2Cdev library doesn't do this automatically)
+#if I2CDEV_IMPLEMENTATION == I2CDEV_ARDUINO_WIRE
+  Wire.begin();
+  Wire.setClock(400000); // 400kHz I2C clock. Comment this line if having compilation difficulties
+#elif I2CDEV_IMPLEMENTATION == I2CDEV_BUILTIN_FASTWIRE
+  Fastwire::setup(400, true);
+#endif
+
+  Serial.begin(9600);
+  while (!Serial); // wait for Leonardo enumeration, others continue immediately
+
+  // initialize device
+  //Serial.println(F("Initializing I2C devices..."));
+  mpu.initialize();
+  pinMode(INTERRUPT_PIN, INPUT);
+
+  devStatus = mpu.dmpInitialize();
+
+  // supply your own gyro offsets here, scaled for min sensitivity
+  mpu.setXGyroOffset(220);
+  mpu.setYGyroOffset(76);
+  mpu.setZGyroOffset(-85);
+  mpu.setZAccelOffset(1788); // 1688 factory default for my test chip
+
+  // make sure it worked (returns 0 if so)
+  if (devStatus == 0) {
+    // turn on the DMP, now that it's ready
+    //  Serial.println(F("Enabling DMP..."));
+    mpu.setDMPEnabled(true);
+
+    // enable Arduino interrupt detection
+    //  Serial.println(F("Enabling interrupt detection (Arduino external interrupt 0)..."));
+    attachInterrupt(digitalPinToInterrupt(INTERRUPT_PIN), dmpDataReady, RISING);
+    mpuIntStatus = mpu.getIntStatus();
+
+    // set our DMP Ready flag so the main loop() function knows it's okay to use it
+    //  Serial.println(F("DMP ready! Waiting for first interrupt..."));
+    dmpReady = true;
+
+    // get expected DMP packet size for later comparison
+    packetSize = mpu.dmpGetFIFOPacketSize();
+  } else {
+
+  }
+  // configure LED for output
+  pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+  counter++;
+  currentMillis = millis();
+  if (currentMillis - previousMillis > 2000 && debugOutput == 1) {
+    previousMillis = millis();
+    counter = 0;
+    Serial.print("flex0 : ");
+    Serial.println(analogRead(A0));
+    Serial.print("flex1 : ");
+    Serial.println(analogRead(A1));
+    Serial.print("flex2 : ");
+    Serial.println(analogRead(A2));
+    Serial.print("flex3 : ");
+    Serial.println(analogRead(A3));
+
+    Serial.print("pitch roll\t");
+    Serial.print("\t");
+    Serial.print(ypr[1] * 180 / M_PI);
+    Serial.print("\t");
+    Serial.println(ypr[2] * 180 / M_PI);
+  }
+
+  if ( debugOutput == 1) {
+    if ( abs(aaWorld.x) > lowerX && abs(aaWorld.x) < upperX)
+    {
+      Serial.println(" acceleration x");
+    }
+    if (abs(aaWorld.y) > lowerY && abs(aaWorld.y) < upperY )
+    {
+      Serial.println(" acceleration y");
+    }
+    if (abs(aaWorld.z) > lowerZ && abs(aaWorld.z) < upperZ)
+    {
+      Serial.println(" acceleration z");
+    }
+  }
+
+  // if programming failed, don't try to do anything
+  if (!dmpReady) return;
+
+  // wait for MPU interrupt or extra packet(s) available
+  while (!mpuInterrupt && fifoCount < packetSize) {
+  }
+
+  // reset interrupt flag and get INT_STATUS byte
+  mpuInterrupt = false;
+  mpuIntStatus = mpu.getIntStatus();
+
+  // get current FIFO count
+  fifoCount = mpu.getFIFOCount();
+
+  // check for overflow (this should never happen unless our code is too inefficient)
+  if ((mpuIntStatus & 0x10) || fifoCount == 1024) {
+    // reset so we can continue cleanly
+    mpu.resetFIFO();
+    //    Serial.println(F("FIFO overflow!"));
+
+    // otherwise, check for DMP data ready interrupt (this should happen frequently)
+  } else if (mpuIntStatus & 0x02) {
+    // wait for correct available data length, should be a VERY short wait
+    while (fifoCount < packetSize) fifoCount = mpu.getFIFOCount();
+
+    // read a packet from FIFO
+    mpu.getFIFOBytes(fifoBuffer, packetSize);
+
+    // track FIFO count here in case there is > 1 packet available
+    // (this lets us immediately read more without waiting for an interrupt)
+    fifoCount -= packetSize;
+
+#ifdef OUTPUT_READABLE_QUATERNION
+    // display quaternion values in easy matrix form: w x y z
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    Serial.print("quat\t");
+    Serial.print(q.w);
+    Serial.print("\t");
+    Serial.print(q.x);
+    Serial.print("\t");
+    Serial.print(q.y);
+    Serial.print("\t");
+    Serial.print(q.z);
+#endif
+
+#ifdef OUTPUT_READABLE_EULER
+    // display Euler angles in degrees
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetEuler(euler, &q);
+    Serial.print("euler\t");
+    Serial.print(euler[0] * 180 / M_PI);
+    Serial.print("\t");
+    Serial.print(euler[1] * 180 / M_PI);
+    Serial.print("\t");
+    Serial.println(euler[2] * 180 / M_PI);
+#endif
+
+#ifdef OUTPUT_READABLE_YAWPITCHROLL
+    // display Euler angles in degrees
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetGravity(&gravity, &q);
+    mpu.dmpGetYawPitchRoll(ypr, &q, &gravity);
+#endif
+
+#ifdef OUTPUT_READABLE_REALACCEL
+    // display real acceleration, adjusted to remove gravity
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetAccel(&aa, fifoBuffer);
+    mpu.dmpGetGravity(&gravity, &q);
+    mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+#endif
+
+#ifdef OUTPUT_READABLE_WORLDACCEL
+    // display initial world-frame acceleration, adjusted to remove gravity
+    // and rotated based on known orientation from quaternion
+    mpu.dmpGetQuaternion(&q, fifoBuffer);
+    mpu.dmpGetAccel(&aa, fifoBuffer);
+    mpu.dmpGetGravity(&gravity, &q);
+    mpu.dmpGetLinearAccel(&aaReal, &aa, &gravity);
+    mpu.dmpGetLinearAccelInWorld(&aaWorld, &aaReal, &q);
+
+    if (analogRead(A1) > 150 && analogRead(A2) > 180 && analogRead(A3) > 90  && analogRead(A3) < 140 ) // Thumb
+    {
+      //  Serial.println("Flex Hello");
+      //Serial.println(analogRead(A3));
+      if ( (abs(aaWorld.x) > lowerX && abs(aaWorld.x) < upperX ) || (abs(aaWorld.y) > lowerY && abs(aaWorld.y) < upperY ))
+      {
+        if ((ypr[1] * 180 / M_PI) > -20 && (ypr[1] * 180 / M_PI) < 20 && (ypr[2] * 180 / M_PI) > 60 && (ypr[2] * 180 / M_PI) < 90)
+        {
+          a++;
+          if (a > 2)
+          {
+            newprint = "Bye ";
+            printing();
+            a = 0;
+          }
+        }
+        else if ((ypr[2] * 180 / M_PI) > -10 && (ypr[2] * 180 / M_PI) < 25)
+        {
+          a++;
+          if (a > 2)
+          {
+            newprint = "Hello ";
+            printing();
+            a = 0;
+          }
+        }
+      }
+      else if ((abs(aaWorld.z) > lowerZ && abs(aaWorld.z) < upperZ )) {
+        d++;
+        if (d > 2)
+        {
+          newprint = "Good Morning ";
+          printing();
+          d = 0;
+        }
+      }
+    }
+
+    if ( analogRead(A1) > 150 && (analogRead(A2) > 180 || analogRead(A2) == 0) && analogRead(A3) > 160 ) // Thumb
+    {
+      if ((abs(aaWorld.z) > lowerZ && abs(aaWorld.z) < upperZ ))
+      {
+        i++;
+      }
+      if (i >= 2)
+      {
+        if ((ypr[1] * 180 / M_PI) > -30 && (ypr[1] * 180 / M_PI) < 20)
+        {
+          newprint = " Suchitra ";
+          printing();
+          i = 0;
+        }
+        if ((ypr[1] * 180 / M_PI) < - 30 && (ypr[1] * 180 / M_PI) > -90)
+        {
+          newprint = " name is ";
+          printing();
+          i = 0;
+        }
+      }
+    }
+
+    if (analogRead(A1) > 50 && analogRead(A1) < 130 && analogRead(A2) > 70 && analogRead(A2) < 180 && analogRead(A3) > 150 ) // Thumb
+    {
+      //      Serial.println("Outer and help project");
+      if ((ypr[2] * 180 / M_PI) < 100 && (ypr[2] * 180 / M_PI) > 70 && (ypr[1] * 180 / M_PI) < 10)
+      {
+        newprint = " and ";
+        printing();
+        i = 0;
+        project = 0;
+      }
+      if ((ypr[1] * 180 / M_PI) < -45 && (ypr[1] * 180 / M_PI) > -110 )
+      {
+        if (abs(aaWorld.z) > lowerZ && abs(aaWorld.z) < upperZ)
+        {
+          help++;
+        }
+        if (help >= 2)
+        {
+          newprint = " help ";
+          printing();
+          help = 0;
+        }
+      }
+      if ((ypr[1] * 180 / M_PI) < - 60 )
+      {
+        if (abs(aaWorld.x) > lowerX && abs(aaWorld.x) < upperX || (abs(aaWorld.y) > lowerY && abs(aaWorld.y) < upperY ))
+        {
+          project++;
+        }
+        if (project >= 2)
+        {
+          newprint = " Project ";
+          printing();
+          project = 0;
+        }
+      }
+    }
+
+    if (analogRead(A1) > 70 && analogRead(A1) < 130 && analogRead(A2) > 160 && analogRead(A2) < 260 && analogRead(A3) > 160 ) // Thumb
+    {
+      // Serial.println("Outer My this is");
+      if ((ypr[1] * 180 / M_PI) > - 110 && (ypr[1] * 180 / M_PI) < - 60)
+      {
+        newprint = " my ";
+        printing();
+      }
+      if ((ypr[1] * 180 / M_PI) > -30 && (ypr[1] * 180 / M_PI) < 20)
+      {
+        // Serial.println("in1");
+        if (abs(aaWorld.z) > lowerZ && abs(aaWorld.z) < upperZ)
+        {
+          //Serial.println("in123");
+          i++;
+          //          delay(300);
+        }
+        if (i >= 2)
+        {
+          newprint = " this is ";
+          printing();
+          i = 0;
+        }
+      }
+    }
+    if (analogRead(A1) > 80 && analogRead(A1) < 160 && analogRead(A2) > 180 && analogRead(A3) > 140 && analogRead(A3) < 240 )
+    {
+      if (abs((ypr[1] * 180 / M_PI)) > 30)
+      {
+        if ( (abs(aaWorld.x) > lowerX && abs(aaWorld.x) < upperX ) || (abs(aaWorld.y) > lowerY && abs(aaWorld.y) < upperY ))
+        {
+          vocally++;
+        }
+        if (vocally > 2)
+        {
+          newprint = " Vocally Challenged ";
+          printing();
+          vocally = 0;
+        }
+      }
+    }
+
+    if ( analogRead(A1) > 80 && analogRead(A1) < 140 && analogRead(A2) > 240 && analogRead(A3) > 180 ) // Thumb
+    {
+      //newprint = "flex ";
+      //       printing();
+      if ((ypr[1] * 180 / M_PI) < 20 && (ypr[1] * 180 / M_PI) > -10 && (ypr[2] * 180 / M_PI) > -10 && (ypr[2] * 180 / M_PI) < 20)
+      {
+        newprint = " to ";
+        printing();
+        //        i=0;
+      }
+    }
+    if (analogRead(A1) > 90 && analogRead(A1) < 130 && analogRead(A2) > 240  && analogRead(A3) > 100 && analogRead(A3) < 170  ) // Thumb
+    {
+      if ( (abs(aaWorld.x) > lowerX && abs(aaWorld.x) < upperX ) || (abs(aaWorld.y) > lowerY && abs(aaWorld.y) < upperY ) || (abs(aaWorld.z) > lowerZ && abs(aaWorld.z) < upperZ ))
+      {
+        designed++;
+      }
+      if (designed > 2)
+      {
+        newprint = " designed ";
+        printing();
+        designed = 0;
+      }
+    }
+#endif
+    // blink LED to indicate activity
+    blinkState = !blinkState;
+    digitalWrite(LED_PIN, blinkState);
+  }
+}
+void printing()
+{
+  if (prevprint == newprint)
+  {
+
+  }
+  else
+  {
+    Serial.println(newprint);
+  }
+  prevprint = newprint;
+  delay(500);
+}
